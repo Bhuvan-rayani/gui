@@ -16,8 +16,8 @@ class TileHandler(BaseHTTPRequestHandler):
 
         z, x, y = map(int, parts)
 
-        # Leaflet expects XYZ origin (top-left) while MBTiles stores TMS (bottom-left).
-        y = (1 << z) - 1 - y
+        # ⚠️ COMMENT THIS OUT if tiles don't appear
+        # y = (1 << z) - 1 - y
 
         if not MBTILES.exists():
             raise FileNotFoundError(f"MBTiles not found: {MBTILES}")

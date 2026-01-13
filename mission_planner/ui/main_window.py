@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import os
-import urllib.parse
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QFont, QPixmap
-from PyQt6.QtWebEngineCore import QWebEngineSettings
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
     QFrame,
@@ -221,16 +218,8 @@ class MissionPlannerWindow(QMainWindow):
         map_layout.setContentsMargins(16, 16, 16, 16)
 
         self.map_view = QWebEngineView()
-        self.map_view.settings().setAttribute(
-            QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls,
-            True,
-        )
         map_html = Path(__file__).resolve().parent / "map.html"
-        google_key = os.environ.get("GOOGLE_MAPS_KEY", "").strip()
-        map_url = QUrl.fromLocalFile(str(map_html))
-        if google_key:
-            map_url.setQuery(f"google_key={urllib.parse.quote(google_key, safe='')}")
-        self.map_view.setUrl(map_url)
+        self.map_view.setUrl(QUrl.fromLocalFile(str(map_html)))
 
         map_layout.addWidget(self.map_view)
         # ============================================
@@ -243,8 +232,8 @@ class MissionPlannerWindow(QMainWindow):
         sb = QVBoxLayout(sidebar)
         sb.setContentsMargins(18, 18, 18, 18)
 
-        self.freyja_card = DroneStatusCard("Freyja", image_path=ASSETS_DIR / "Freyja.png")
-        self.cleo_card = DroneStatusCard("Cleo", image_path=ASSETS_DIR / "Cleo.png")
+        self.freyja_card = DroneStatusCard("Freyja", image_path=ASSETS_DIR / "drone.png")
+        self.cleo_card = DroneStatusCard("Cleo", image_path=ASSETS_DIR / "drone.png")
 
         sb.addWidget(self.freyja_card)
         sb.addWidget(self.cleo_card)

@@ -18,8 +18,4 @@ Use the workspace virtualenv at `.venv`.
 /home/parth/Desktop/Nidar-gui/.venv/bin/python -m mission_planner
 ```
 
-## Notes
 
-- The map area is currently a placeholder widget.
-- Drone statuses are currently static labels (easy to wire later).
-# Manas-Planner

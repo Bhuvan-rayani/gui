@@ -10,3 +10,4 @@ __pycache__/
 *.mbtiles
 !mission_planner/data/NIDAR.mbtiles
 !NIDAR.mbtiles
+.venv/

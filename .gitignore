@@ -1,0 +1,12 @@
+.vscode/
+__pycache__/
+*.py[cod]
+*.pyo
+*.log
+*.db
+*.sqlite3
+*.db-shm
+*.db-wal
+*.mbtiles
+!mission_planner/data/NIDAR.mbtiles
+!NIDAR.mbtiles

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import urllib.parse
+from PyQt6.QtWebEngineCore import QWebEngineSettings
+from PyQt6.QtWebEngineCore import QWebEnginePage
+import subprocess
 
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QFont, QPixmap
@@ -16,6 +21,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from ..workers.mavlink_worker import MavlinkGPSWorker
 
 ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 
@@ -104,6 +110,7 @@ class DroneStatusCard(QFrame):
         layout.addWidget(self.status_lbl)
         layout.addWidget(info)
         layout.addWidget(self.gps_lbl)
+        
 
     def _make_kv_card(self, key: str, value: str) -> QFrame:
         card = QFrame()
@@ -180,6 +187,19 @@ class MissionPlannerWindow(QMainWindow):
 
         self._apply_styles()
 
+        # ================= MAVLINK WORKERS =================
+        self.freyja_worker = MavlinkGPSWorker(14550)
+        self.freyja_worker.gps_update.connect(self._update_freyja)
+        self.freyja_worker.heartbeat.connect(self.freyja_card.set_live)
+        self.freyja_worker.start()
+
+        self.cleo_worker = MavlinkGPSWorker(14560)
+        self.cleo_worker.gps_update.connect(self._update_cleo)
+        self.cleo_worker.heartbeat.connect(self.cleo_card.set_live)
+        self.cleo_worker.start()
+
+
+
     def _build_header(self) -> QFrame:
         header = QFrame()
         header.setObjectName("Header")
@@ -203,6 +223,63 @@ class MissionPlannerWindow(QMainWindow):
         layout.addWidget(self.global_status)
 
         return header
+    
+    def closeEvent(self, event):
+        self.freyja_worker.stop()
+        self.cleo_worker.stop()
+        self.freyja_worker.wait()
+        self.cleo_worker.wait()
+        event.accept()
+
+
+    def _update_freyja(self, lat, lon, alt, ts, gps_active):
+        self.freyja_card.set_live(True)
+        self.freyja_card.set_position(
+            latitude=lat,
+            longitude=lon,
+            altitude_m=alt,
+            updated_text=ts,
+        )
+        self.freyja_card.set_gps_active(gps_active)
+        self._update_map_marker("freyja", lat, lon)
+
+    def _update_cleo(self, lat, lon, alt, ts, gps_active):
+        self.cleo_card.set_live(True)
+        self.cleo_card.set_position(
+            latitude=lat,
+            longitude=lon,
+            altitude_m=alt,
+            updated_text=ts,
+        )
+        self.cleo_card.set_gps_active(gps_active)
+        self._update_map_marker("cleo", lat, lon)
+
+    def _update_map_marker(self, drone_id: str, lat: float, lon: float):
+        js = f"""
+            window.updateDroneMarker("{drone_id}", {lat}, {lon});
+        """
+        self.map_view.page().runJavaScript(js)
+
+    def _start_mission(self):
+        """
+        Launch mission processes in external terminals.
+        Runs asynchronously – UI will NOT block.
+        """
+        try:
+            subprocess.Popen([
+                "gnome-terminal",
+                "--geometry=90x24+0+0",
+                "--", "bash", "-c",
+                "python3 /home/michelle/Minimalistic-Flat-Modern-GUI-Template/checking_shit/running_everything.py; exec bash"
+            ])
+
+            # Optional UI feedback
+            self.btn_start.setEnabled(False)
+            self.btn_start.setText("Mission Running")
+
+        except Exception as e:
+            print("[ERROR] Failed to start mission:", e)
+
 
     def _build_body(self) -> QFrame:
         body = QFrame()
@@ -218,11 +295,28 @@ class MissionPlannerWindow(QMainWindow):
         map_layout.setContentsMargins(16, 16, 16, 16)
 
         self.map_view = QWebEngineView()
-        map_html = Path(__file__).resolve().parent / "map.html"
-        self.map_view.setUrl(QUrl.fromLocalFile(str(map_html)))
 
+        class DebugPage(QWebEnginePage):
+            def javaScriptConsoleMessage(self, level, msg, line, source):
+                print(f"[JS] {msg} ({source}:{line})")
+
+        self.map_view.setPage(DebugPage(self.map_view))
+
+        self.map_view.settings().setAttribute(
+            QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls,
+            True,
+        )
+
+        google_key = os.environ.get("GOOGLE_MAPS_KEY", "").strip()
+
+        map_url = QUrl("http://127.0.0.1:8000/map.html")
+        if google_key:
+            map_url.setQuery(f"google_key={urllib.parse.quote(google_key, safe='')}")
+
+        self.map_view.setUrl(map_url)
         map_layout.addWidget(self.map_view)
         # ============================================
+
 
         # Sidebar
         sidebar = QFrame()
@@ -232,17 +326,18 @@ class MissionPlannerWindow(QMainWindow):
         sb = QVBoxLayout(sidebar)
         sb.setContentsMargins(18, 18, 18, 18)
 
-        self.freyja_card = DroneStatusCard("Freyja", image_path=ASSETS_DIR / "drone.png")
-        self.cleo_card = DroneStatusCard("Cleo", image_path=ASSETS_DIR / "drone.png")
+        self.freyja_card = DroneStatusCard("Freyja", image_path=ASSETS_DIR / "Freyja.png")
+        self.cleo_card = DroneStatusCard("Cleo", image_path=ASSETS_DIR / "Cleo.png")
 
         sb.addWidget(self.freyja_card)
         sb.addWidget(self.cleo_card)
         sb.addStretch()
 
-        btn_start = QPushButton("Start Mission")
-        btn_start.setObjectName("PrimaryButton")
+        self.btn_start = QPushButton("Start Mission")
+        self.btn_start.setObjectName("PrimaryButton")
+        self.btn_start.clicked.connect(self._start_mission)
+        sb.addWidget(self.btn_start)
 
-        sb.addWidget(btn_start)
 
         layout.addWidget(map_frame, 1)
         layout.addWidget(sidebar, 0)

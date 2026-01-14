@@ -7,30 +7,69 @@
   <script src="leaflet.js"></script>
 
   <style>
-    html, body, #map { height: 100%; margin: 0; background: #0d0d0d; }
+    html, body, #map { height: 100%; width: 100%; margin: 0; background: #0d0d0d; }
+    body { min-height: 100vh; }
+    body, #map { display: block; }
   </style>
 </head>
 <body>
 <div id="map"></div>
 
 <script>
-  const map = L.map('map', {
+  const params = new URLSearchParams(window.location.search);
+  const googleMapsKey = params.get('google_key')?.trim() ?? '';
+
+  const leafletOptions = {
     zoomControl: true,
     attributionControl: false,
     minZoom: 0,
-    maxZoom: 18
-  }).setView([0, 0], 2);   // 🌍 ALWAYS EXISTS
+    maxZoom: 19
+  };
 
-  L.tileLayer('http://127.0.0.1:8000/{z}/{x}/{y}', {
+  const tileLayerOptions = {
     minZoom: 0,
-    maxZoom: 18,
+    maxZoom: 19,
     tileSize: 256,
     noWrap: true
-  }).addTo(map);
-
-  window.setCenter = function(lat, lon) {
-    map.setView([lat, lon], map.getZoom());
   };
+
+  function createLeafletMap() {
+    const map = L.map('map', leafletOptions).setView([0, 0], 2);
+    L.tileLayer('http://127.0.0.1:8000/{z}/{x}/{y}', tileLayerOptions).addTo(map);
+    window.setCenter = function(lat, lon) {
+      map.setView([lat, lon], map.getZoom());
+    };
+  }
+
+  function initGoogleMap() {
+    const googleMap = new google.maps.Map(document.getElementById('map'), {
+      center: { lat: 0, lng: 0 },
+      zoom: 2,
+      minZoom: 0,
+      maxZoom: 19,
+      disableDefaultUI: true,
+      mapTypeId: google.maps.MapTypeId.SATELLITE
+    });
+    window.setCenter = function(lat, lon) {
+      googleMap.setCenter({ lat, lng: lon });
+    };
+  }
+
+  if (googleMapsKey) {
+    window.initGoogleMap = initGoogleMap;
+    const script = document.createElement('script');
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(googleMapsKey)}&callback=initGoogleMap`;
+    script.async = true;
+    script.defer = true;
+    script.onerror = () => {
+      console.warn('Failed to load Google Maps SDK, falling back to offline tiles.');
+      createLeafletMap();
+    };
+    document.head.appendChild(script);
+  } else {
+    console.warn('GOOGLE_MAPS_KEY missing; falling back to bundled MBTiles.');
+    createLeafletMap();
+  }
 </script>
 
 </body>

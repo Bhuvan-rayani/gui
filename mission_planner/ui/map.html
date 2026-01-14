@@ -33,9 +33,112 @@
     noWrap: true
   };
 
+  const droneColors = {
+    freyja: '#f49221',
+    cleo: '#69e36b'
+  };
+
+  const droneMarkers = {};
+  let currentMap = null;
+  let mapMode = null;
+
+  function _focusMapOn(lat, lon) {
+    if (!currentMap || currentMap.__hasCentered) {
+      return;
+    }
+
+    if (mapMode === 'leaflet') {
+      currentMap.setView([lat, lon], 14, { animate: true });
+    } else if (mapMode === 'google') {
+      currentMap.setCenter({ lat, lng: lon });
+      currentMap.setZoom(14);
+    }
+
+    currentMap.__hasCentered = true;
+  }
+
+  function _updateLeafletMarker(droneId, lat, lon) {
+    const position = [lat, lon];
+    const color = droneColors[droneId] ?? '#ffffff';
+    const existing = droneMarkers[droneId];
+
+    if (existing) {
+      existing.setLatLng(position);
+    } else {
+      const marker = L.circleMarker(position, {
+        radius: 8,
+        color,
+        weight: 3,
+        fillColor: color,
+        fillOpacity: 0.9
+      });
+      marker.addTo(currentMap);
+      marker.bindTooltip(`<strong style="color:${color}">${droneId}</strong>`, {
+        permanent: true,
+        direction: 'top',
+        offset: [0, -12]
+      });
+      droneMarkers[droneId] = marker;
+    }
+
+    _focusMapOn(lat, lon);
+  }
+
+  function _updateGoogleMarker(droneId, lat, lon) {
+    const position = { lat, lng: lon };
+    const color = droneColors[droneId] ?? '#ffffff';
+    const existing = droneMarkers[droneId];
+
+    if (existing) {
+      existing.setPosition(position);
+    } else {
+      const marker = new google.maps.Marker({
+        position,
+        map: currentMap,
+        title: droneId,
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 9,
+          strokeWeight: 2,
+          strokeColor: '#111',
+          fillColor: color,
+          fillOpacity: 1
+        }
+      });
+      droneMarkers[droneId] = marker;
+    }
+
+    _focusMapOn(lat, lon);
+  }
+
+  function _updateDroneMarkerOnMap(droneId, lat, lon) {
+    if (mapMode === 'leaflet') {
+      _updateLeafletMarker(droneId, lat, lon);
+    } else if (mapMode === 'google') {
+      _updateGoogleMarker(droneId, lat, lon);
+    }
+  }
+
+  function _registerLeaflet(map) {
+    currentMap = map;
+    mapMode = 'leaflet';
+    window.updateDroneMarker = _updateDroneMarkerOnMap;
+  }
+
+  function _registerGoogle(map) {
+    currentMap = map;
+    mapMode = 'google';
+    window.updateDroneMarker = _updateDroneMarkerOnMap;
+  }
+
+  window.updateDroneMarker = () => {
+    console.warn('Map not ready; marker ignored');
+  };
+
   function createLeafletMap() {
     const map = L.map('map', leafletOptions).setView([0, 0], 2);
     L.tileLayer('http://127.0.0.1:8000/{z}/{x}/{y}', tileLayerOptions).addTo(map);
+    _registerLeaflet(map);
     window.setCenter = function(lat, lon) {
       map.setView([lat, lon], map.getZoom());
     };
@@ -50,6 +153,7 @@
       disableDefaultUI: true,
       mapTypeId: google.maps.MapTypeId.SATELLITE
     });
+    _registerGoogle(googleMap);
     window.setCenter = function(lat, lon) {
       googleMap.setCenter({ lat, lng: lon });
     };

@@ -309,7 +309,8 @@ class MissionPlannerWindow(QMainWindow):
 
         google_key = os.environ.get("GOOGLE_MAPS_KEY", "").strip()
 
-        map_url = QUrl("http://127.0.0.1:8000/map.html")
+        map_path = Path(__file__).resolve().parent / "map.html"
+        map_url = QUrl.fromLocalFile(str(map_path))
         if google_key:
             map_url.setQuery(f"google_key={urllib.parse.quote(google_key, safe='')}")
 
@@ -337,6 +338,14 @@ class MissionPlannerWindow(QMainWindow):
         self.btn_start.setObjectName("PrimaryButton")
         self.btn_start.clicked.connect(self._start_mission)
         sb.addWidget(self.btn_start)
+
+        btn_freyja_kill = QPushButton("Freyja Kill")
+        btn_freyja_kill.setObjectName("SecondaryButton")
+        sb.addWidget(btn_freyja_kill)
+
+        btn_cleo_kill = QPushButton("Cleo Kill")
+        btn_cleo_kill.setObjectName("SecondaryButton")
+        sb.addWidget(btn_cleo_kill)
 
 
         layout.addWidget(map_frame, 1)

@@ -1,349 +1,369 @@
 from __future__ import annotations
 
-from pathlib import Path
+import sys
 import os
-import urllib.parse
-from PyQt6.QtWebEngineCore import QWebEngineSettings
-from PyQt6.QtWebEngineCore import QWebEnginePage
-import subprocess
-
-from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QFont, QPixmap
+import cv2
+import numpy as np
+from pathlib import Path
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
+from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage
 from PyQt6.QtWidgets import (
+    QApplication,
     QFrame,
-    QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
     QSizePolicy,
-    QSpacerItem,
     QVBoxLayout,
+    QHBoxLayout,
     QWidget,
+    QTabWidget,
 )
-from ..workers.mavlink_worker import MavlinkGPSWorker
 
-ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
+ASSETS_DIR = Path(__file__).parent / "assets"
+
+# =========================
+# Yellow Detection Pipeline
+# (EXACT LOGIC, LIVE)
+# =========================
+
+min_contour = 100
+
+def detect_yellow_live(img_bgr, edge_margin_px=100):
+    if img_bgr is None:
+        return []
+
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+
+    # EXACT HSV RANGE
+    lower = np.array([20, 170, 40])
+    upper = np.array([40, 255, 255])
+
+    mask = cv2.inRange(hsv, lower, upper)
+
+    kernel = np.ones((6, 6), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.dilate(mask, kernel, iterations=1)
+
+    contours, _ = cv2.findContours(
+        mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    img_h, img_w = img_bgr.shape[:2]
+    centroids = []
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_contour:
+            continue
+
+        M = cv2.moments(cnt)
+        if M.get("m00", 0) == 0:
+            continue
+
+        cx = M["m10"] / M["m00"]
+        cy = M["m01"] / M["m00"]
+
+        # Ignore detections near image edges
+        if (
+            cx < edge_margin_px or
+            cx > img_w - edge_margin_px or
+            cy < edge_margin_px or
+            cy > img_h - edge_margin_px
+        ):
+            continue
+
+        centroids.append((cx, cy))
+
+    return centroids
+
+# =========================
+# OpenCV Worker (THREAD)
+# =========================
+import time  # REQUIRED
 
 
-def _safe_pixmap(path: Path, *, height: int | None = None) -> QPixmap | None:
-    if not path.exists():
-        return None
-    pix = QPixmap(str(path))
-    if pix.isNull():
-        return None
-    if height is not None:
-        pix = pix.scaledToHeight(height, Qt.TransformationMode.SmoothTransformation)
-    return pix
+class OpenCVWorker(QThread):
+    frame_ready = pyqtSignal(QImage)
+
+    def __init__(self, source=0, target_fps=None):
+        super().__init__()
+        self.source = source
+        self.running = True
+        self.target_fps = target_fps
+        self._frame_interval = 1.0 / target_fps if target_fps else None
+
+    # -----------------------------
+    # YUV → BGR helper
+    # -----------------------------
+    def _convert_yuv(self, frame):
+        if frame is None:
+            return None
+
+        # YUYV sometimes arrives as HxWx2
+        if frame.ndim == 3 and frame.shape[2] == 2:
+            try:
+                return cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_YUY2)
+            except cv2.error:
+                pass
+
+        return frame
+
+    # -----------------------------
+    # MAIN THREAD LOOP
+    # -----------------------------
+    def run(self):
+        cap = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+
+        if not cap.isOpened():
+            print("[OpenCVWorker] ERROR: Camera could not be opened")
+            return
+
+        last_time = time.perf_counter()
+
+        while self.running:
+            # ---------- FPS LIMIT ----------
+            if self._frame_interval is not None:
+                now = time.perf_counter()
+                elapsed = now - last_time
+                if elapsed < self._frame_interval:
+                    time.sleep(self._frame_interval - elapsed)
+                last_time = time.perf_counter()
+
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                continue
+
+            # ---------- Decode ----------
+            frame = self._convert_yuv(frame)
+            if frame is None:
+                continue
+
+            # ==========================================
+            # 🔥 LIVE YELLOW DETECTION (ONCE)
+            # ==========================================
+            centroids = detect_yellow_live(frame)
+
+            for (cx, cy) in centroids:
+                cx_i, cy_i = int(round(cx)), int(round(cy))
+
+                arrow_start = (cx_i - 40, cy_i - 40)
+                arrow_end = (cx_i, cy_i)
+
+                cv2.arrowedLine(
+                    frame,
+                    arrow_start,
+                    arrow_end,
+                    (0, 0, 255),
+                    1,
+                    tipLength=0.25
+                )
+
+                cv2.putText(
+                    frame,
+                    "Diseased Plant",
+                    (arrow_start[0], arrow_start[1] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 0, 255),
+                    1,
+                    cv2.LINE_AA
+                )
+            # ==========================================
+
+            # ---------- Convert to Qt ----------
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+
+            qimg = QImage(
+                rgb.data,
+                w,
+                h,
+                ch * w,
+                QImage.Format.Format_RGB888
+            ).copy()  # REQUIRED for thread safety
+
+            self.frame_ready.emit(qimg)
+
+        cap.release()
+
+    # -----------------------------
+    # Clean shutdown
+    # -----------------------------
+    def stop(self):
+        self.running = False
+        self.wait()
 
 
-class DroneStatusCard(QFrame):
-    def __init__(
-        self,
-        name: str,
-        status_text: str = "Status: Offline",
-        image_path: Path | None = None,
-        *,
-        latitude: float | None = None,
-        longitude: float | None = None,
-        altitude_m: float | None = None,
-        updated_text: str | None = None,
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
 
-        self.setObjectName("DroneStatusCard")
+
+# =========================
+# Camera Tab
+# =========================
+class CameraTab(QWidget):
+    def __init__(self):
+        super().__init__()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
 
-        name_lbl = QLabel(name)
-        name_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        name_lbl.setObjectName("DroneName")
+        title = QLabel("Camera Feed (OpenCV Output)")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet(
+            "color:#f49221; font-size:18px; font-weight:700;"
+        )
 
-        img_lbl = QLabel()
-        img_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        img_lbl.setObjectName("DroneImage")
-        img_lbl.setMinimumHeight(86)
+        self.video_label = QLabel()
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        pix = _safe_pixmap(image_path, height=78) if image_path else None
-        if pix is not None:
-            img_lbl.setPixmap(pix)
-        else:
-            img_lbl.setText("[drone]")
+        # 🔥 CRITICAL FIXES
+        self.video_label.setScaledContents(False)
+        self.video_label.setMinimumSize(1, 1)
+        self.video_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Ignored,
+        )
 
-        self.status_lbl = QLabel(status_text)
-        self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self.status_lbl.setObjectName("DroneStatus")
-        self.status_lbl.setProperty("live", False)
+        self.video_label.setStyleSheet(
+            "background:#000; border:2px solid #f49221;"
+        )
 
-        info = QFrame()
-        info.setObjectName("InfoGrid")
-        info_layout = QVBoxLayout(info)
-        info_layout.setContentsMargins(0, 0, 0, 0)
-        info_layout.setSpacing(10)
+        layout.addWidget(title)
+        layout.addWidget(self.video_label, 1)
 
-        row1 = QHBoxLayout()
-        row2 = QHBoxLayout()
+        self._last_pixmap = None
 
-        self.lat_card = self._make_kv_card("Latitude", "--")
-        self.lon_card = self._make_kv_card("Longitude", "--")
-        self.alt_card = self._make_kv_card("Altitude", "--")
-        self.updated_card = self._make_kv_card("Updated", "--")
+        self.worker = OpenCVWorker(0)
+        self.worker.frame_ready.connect(self.update_frame)
+        self.worker.start()
 
-        row1.addWidget(self.lat_card)
-        row1.addWidget(self.lon_card)
-        row2.addWidget(self.alt_card)
-        row2.addWidget(self.updated_card)
+    def update_frame(self, img: QImage):
+        self._last_pixmap = QPixmap.fromImage(img)
+        self._update_scaled_pixmap()
 
-        info_layout.addLayout(row1)
-        info_layout.addLayout(row2)
+    def _update_scaled_pixmap(self):
+        if self._last_pixmap is None:
+            return
 
-        self.gps_lbl = QLabel("GPS: --")
-        self.gps_lbl.setObjectName("GpsStatus")
-        self.gps_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self.gps_lbl.setProperty("gps", "unknown")
+        target_size = self.video_label.size()
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            return
 
-        layout.addWidget(name_lbl)
-        layout.addWidget(img_lbl)
-        layout.addWidget(self.status_lbl)
-        layout.addWidget(info)
-        layout.addWidget(self.gps_lbl)
-        
+        scaled = self._last_pixmap.scaled(
+            target_size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.video_label.setPixmap(scaled)
 
-    def _make_kv_card(self, key: str, value: str) -> QFrame:
-        card = QFrame()
-        card.setObjectName("KvCard")
-        v = QVBoxLayout(card)
-        v.setContentsMargins(10, 8, 10, 8)
-        v.setSpacing(2)
+    def resizeEvent(self, event):
+        self._update_scaled_pixmap()
+        super().resizeEvent(event)
 
-        k = QLabel(key)
-        k.setObjectName("KvKey")
-        val = QLabel(value)
-        val.setObjectName("KvValue")
-        val.setWordWrap(True)
-
-        v.addWidget(k)
-        v.addWidget(val)
-        card._value_label = val
-        return card
-
-    def _set_kv_value(self, card: QFrame, value: str) -> None:
-        card._value_label.setText(value)
-
-    def set_position(self, *, latitude=None, longitude=None, altitude_m=None, updated_text=None):
-        if latitude is not None:
-            self._set_kv_value(self.lat_card, f"{latitude:.6f}")
-        if longitude is not None:
-            self._set_kv_value(self.lon_card, f"{longitude:.6f}")
-        if altitude_m is not None:
-            self._set_kv_value(self.alt_card, f"{altitude_m:.1f} m")
-        if updated_text is not None:
-            self._set_kv_value(self.updated_card, updated_text)
-
-    def set_gps_active(self, active: bool | None) -> None:
-        if active is None:
-            self.gps_lbl.setText("GPS: --")
-            self.gps_lbl.setProperty("gps", "unknown")
-        else:
-            self.gps_lbl.setText("GPS: Active" if active else "GPS: Inactive")
-            self.gps_lbl.setProperty("gps", "active" if active else "inactive")
-        self.gps_lbl.style().polish(self.gps_lbl)
-
-    def set_live(self, live: bool) -> None:
-        self.status_lbl.setText("Status: Live" if live else "Status: Offline")
-        self.status_lbl.setProperty("live", live)
-        self.status_lbl.style().polish(self.status_lbl)
+    def shutdown(self):
+        self.worker.stop()
 
 
+
+
+# =========================
+# Mission Planner Window
+# =========================
 class MissionPlannerWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__()
-        
-        # Start offline tile server (runs once, non-blocking)
-        import threading
-        from .. import tile_server
-
-        threading.Thread(
-            target=tile_server.run,
-            daemon=True
-        ).start()
-
-
 
         self.setWindowTitle("Manas Planner")
         self.resize(1200, 700)
 
         root = QWidget()
         self.setCentralWidget(root)
-
         outer = QVBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
 
         outer.addWidget(self._build_header())
-        outer.addWidget(self._build_body())
+        outer.addWidget(self._build_tabs())
 
         self._apply_styles()
 
-        # ================= MAVLINK WORKERS =================
-        self.freyja_worker = MavlinkGPSWorker(14550)
-        self.freyja_worker.gps_update.connect(self._update_freyja)
-        self.freyja_worker.heartbeat.connect(self.freyja_card.set_live)
-        self.freyja_worker.start()
-
-        self.cleo_worker = MavlinkGPSWorker(14560)
-        self.cleo_worker.gps_update.connect(self._update_cleo)
-        self.cleo_worker.heartbeat.connect(self.cleo_card.set_live)
-        self.cleo_worker.start()
-
-
-
-    def _build_header(self) -> QFrame:
+    # ---------- HEADER ----------
+    def _build_header(self):
         header = QFrame()
-        header.setObjectName("Header")
         header.setFixedHeight(70)
+        header.setObjectName("Header")
 
         layout = QHBoxLayout(header)
         layout.setContentsMargins(18, 10, 18, 10)
 
-        logo = QLabel()
-        logo_pix = _safe_pixmap(ASSETS_DIR / "manas-full-white.png", height=50)
-        if logo_pix:
-            logo.setPixmap(logo_pix)
-        else:
-            logo.setText("PROJECT MANAS")
+        logo = QLabel("PROJECT MANAS")
+        logo.setStyleSheet("color:white; font-size:22px; font-weight:800;")
 
         self.global_status = QLabel("Status: Offline")
-        self.global_status.setObjectName("GlobalStatus")
+        self.global_status.setStyleSheet("color:#ccc;")
 
         layout.addWidget(logo)
         layout.addStretch()
         layout.addWidget(self.global_status)
 
         return header
-    
-    def closeEvent(self, event):
-        self.freyja_worker.stop()
-        self.cleo_worker.stop()
-        self.freyja_worker.wait()
-        self.cleo_worker.wait()
-        event.accept()
 
+    # ---------- TABS ----------
+    def _build_tabs(self):
+        tabs = QTabWidget()
 
-    def _update_freyja(self, lat, lon, alt, ts, gps_active):
-        self.freyja_card.set_live(True)
-        self.freyja_card.set_position(
-            latitude=lat,
-            longitude=lon,
-            altitude_m=alt,
-            updated_text=ts,
-        )
-        self.freyja_card.set_gps_active(gps_active)
-        self._update_map_marker("freyja", lat, lon)
+        tabs.addTab(self._build_map_tab(), "Map")
+        self.camera_tab = CameraTab()
+        tabs.addTab(self.camera_tab, "Camera")
 
-    def _update_cleo(self, lat, lon, alt, ts, gps_active):
-        self.cleo_card.set_live(True)
-        self.cleo_card.set_position(
-            latitude=lat,
-            longitude=lon,
-            altitude_m=alt,
-            updated_text=ts,
-        )
-        self.cleo_card.set_gps_active(gps_active)
-        self._update_map_marker("cleo", lat, lon)
+        return tabs
 
-    def _update_map_marker(self, drone_id: str, lat: float, lon: float):
-        js = f"""
-            window.updateDroneMarker("{drone_id}", {lat}, {lon});
-        """
-        self.map_view.page().runJavaScript(js)
-
-    def _start_mission(self):
-        """
-        Launch mission processes in external terminals.
-        Runs asynchronously – UI will NOT block.
-        """
-        try:
-            subprocess.Popen([
-                "gnome-terminal",
-                "--geometry=90x24+0+0",
-                "--", "bash", "-c",
-                "python3 /home/michelle/Minimalistic-Flat-Modern-GUI-Template/checking_shit/running_everything.py; exec bash"
-            ])
-
-            # Optional UI feedback
-            self.btn_start.setEnabled(False)
-            self.btn_start.setText("Mission Running")
-
-        except Exception as e:
-            print("[ERROR] Failed to start mission:", e)
-
-
-    def _build_body(self) -> QFrame:
+    # ---------- MAP TAB ----------
+    def _build_map_tab(self):
         body = QFrame()
-        body.setObjectName("Body")
-
         layout = QHBoxLayout(body)
-        layout.setContentsMargins(0, 0, 0, 0)
 
-        # ================= MAP AREA =================
         map_frame = QFrame()
-        map_frame.setObjectName("MapArea")
         map_layout = QVBoxLayout(map_frame)
-        map_layout.setContentsMargins(16, 16, 16, 16)
 
         self.map_view = QWebEngineView()
 
         class DebugPage(QWebEnginePage):
             def javaScriptConsoleMessage(self, level, msg, line, source):
-                print(f"[JS] {msg} ({source}:{line})")
+                print(f"[JS] {msg}")
 
         self.map_view.setPage(DebugPage(self.map_view))
-
         self.map_view.settings().setAttribute(
             QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls,
             True,
         )
 
-        google_key = os.environ.get("GOOGLE_MAPS_KEY", "").strip()
+        map_html = Path(__file__).parent / "map.html"
+        self.map_view.setUrl(QUrl.fromLocalFile(str(map_html)))
 
-        map_path = Path(__file__).resolve().parent / "map.html"
-        map_url = QUrl.fromLocalFile(str(map_path))
-        if google_key:
-            map_url.setQuery(f"google_key={urllib.parse.quote(google_key, safe='')}")
-
-        self.map_view.setUrl(map_url)
         map_layout.addWidget(self.map_view)
-        # ============================================
 
-
-        # Sidebar
         sidebar = QFrame()
-        sidebar.setObjectName("Sidebar")
         sidebar.setFixedWidth(280)
-
         sb = QVBoxLayout(sidebar)
-        sb.setContentsMargins(18, 18, 18, 18)
 
-        self.freyja_card = DroneStatusCard("Freyja", image_path=ASSETS_DIR / "Freyja.png")
-        self.cleo_card = DroneStatusCard("Cleo", image_path=ASSETS_DIR / "Cleo.png")
+        btn = QPushButton("Start Mission")
+        btn.setObjectName("PrimaryButton")
 
-        sb.addWidget(self.freyja_card)
-        sb.addWidget(self.cleo_card)
         sb.addStretch()
-
-        self.btn_start = QPushButton("Start Mission")
-        self.btn_start.setObjectName("PrimaryButton")
-        self.btn_start.clicked.connect(self._start_mission)
-        sb.addWidget(self.btn_start)
-
+        sb.addWidget(btn)
 
         layout.addWidget(map_frame, 1)
-        layout.addWidget(sidebar, 0)
+        layout.addWidget(sidebar)
 
         return body
+
+    def closeEvent(self, event):
+        self.camera_tab.close()
+        event.accept()
 
 
     def _apply_styles(self) -> None:
@@ -501,5 +521,40 @@ class MissionPlannerWindow(QMainWindow):
                 outline: none;
                 border: 2px solid rgba(244, 146, 33, 0.95);
             }
+
+                        #Header {
+                background:#070707;
+                border-bottom:2px solid #f49221;
+            }
+
+            QTabWidget::pane {
+                border-top:2px solid #f49221;
+                background:#070707;
+            }
+
+            QTabBar::tab {
+                background:#0d0d0d;
+                color:#cfcfcf;
+                padding:10px 22px;
+                font-weight:700;
+            }
+
+            QTabBar::tab:selected {
+                color:#f49221;
+                border-bottom:2px solid #f49221;
+            }
+
+            QPushButton#PrimaryButton {
+                background:#f49221;
+                border-radius:12px;
+                padding:14px;
+                font-weight:800;
+            }
+            
             """
         )
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    win = MissionPlannerWindow()
+    win.show()
+    sys.exit(app.exec())

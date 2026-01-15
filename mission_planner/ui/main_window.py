@@ -24,10 +24,6 @@ from PyQt6.QtWidgets import (
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 
-# =========================
-# Yellow Detection Pipeline
-# (EXACT LOGIC, LIVE)
-# =========================
 
 min_contour = 100
 
@@ -66,7 +62,6 @@ def detect_yellow_live(img_bgr, edge_margin_px=100):
         cx = M["m10"] / M["m00"]
         cy = M["m01"] / M["m00"]
 
-        # Ignore detections near image edges
         if (
             cx < edge_margin_px or
             cx > img_w - edge_margin_px or
@@ -79,9 +74,6 @@ def detect_yellow_live(img_bgr, edge_margin_px=100):
 
     return centroids
 
-# =========================
-# OpenCV Worker (THREAD)
-# =========================
 import time  # REQUIRED
 
 
@@ -111,9 +103,6 @@ class OpenCVWorker(QThread):
 
         return frame
 
-    # -----------------------------
-    # MAIN THREAD LOOP
-    # -----------------------------
     def run(self):
         cap = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
@@ -125,7 +114,6 @@ class OpenCVWorker(QThread):
         last_time = time.perf_counter()
 
         while self.running:
-            # ---------- FPS LIMIT ----------
             if self._frame_interval is not None:
                 now = time.perf_counter()
                 elapsed = now - last_time
@@ -142,9 +130,6 @@ class OpenCVWorker(QThread):
             if frame is None:
                 continue
 
-            # ==========================================
-            # 🔥 LIVE YELLOW DETECTION (ONCE)
-            # ==========================================
             centroids = detect_yellow_live(frame)
 
             for (cx, cy) in centroids:
@@ -172,9 +157,7 @@ class OpenCVWorker(QThread):
                     1,
                     cv2.LINE_AA
                 )
-            # ==========================================
 
-            # ---------- Convert to Qt ----------
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb.shape
 
@@ -190,19 +173,13 @@ class OpenCVWorker(QThread):
 
         cap.release()
 
-    # -----------------------------
-    # Clean shutdown
-    # -----------------------------
+
     def stop(self):
         self.running = False
         self.wait()
 
 
 
-
-# =========================
-# Camera Tab
-# =========================
 class CameraTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -220,7 +197,6 @@ class CameraTab(QWidget):
         self.video_label = QLabel()
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # 🔥 CRITICAL FIXES
         self.video_label.setScaledContents(False)
         self.video_label.setMinimumSize(1, 1)
         self.video_label.setSizePolicy(
@@ -268,11 +244,6 @@ class CameraTab(QWidget):
         self.worker.stop()
 
 
-
-
-# =========================
-# Mission Planner Window
-# =========================
 class MissionPlannerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -290,7 +261,6 @@ class MissionPlannerWindow(QMainWindow):
 
         self._apply_styles()
 
-    # ---------- HEADER ----------
     def _build_header(self):
         header = QFrame()
         header.setFixedHeight(70)
@@ -321,7 +291,6 @@ class MissionPlannerWindow(QMainWindow):
 
         return tabs
 
-    # ---------- MAP TAB ----------
     def _build_map_tab(self):
         body = QFrame()
         layout = QHBoxLayout(body)
